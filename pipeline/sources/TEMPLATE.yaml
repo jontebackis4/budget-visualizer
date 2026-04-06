@@ -1,0 +1,25 @@
+# Source manifest template — copy to {riksmöte_year}.yaml (e.g. 2024_25.yaml)
+# and fill in the URLs before running the ingestion pipeline.
+#
+# How to find the URLs:
+#   1. Go to https://www.riksdagen.se/sv/dokument-och-lagar/dokument/motion/
+#   2. Filter by document type "Följdmotion" or "Budgetmotion", year, and party.
+#   3. Open the main budget motion for the party (the one covering all utgiftsområden).
+#   4. Copy the direct download link to the DOCX file from data.riksdagen.se.
+#
+# One entry per opposition party. Add or remove parties to match the current
+# parliamentary situation. Party abbreviations must match what the ingestion
+# script and frontend expect (e.g. S, V, MP, C, SD, KD, L, M).
+#
+# Government proposal URLs are NOT listed here — they are fetched automatically
+# via the Riksdagen API.
+
+parties:
+  S:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  V:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  MP: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  C:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  # SD: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  # KD: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  # L:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  # M:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
