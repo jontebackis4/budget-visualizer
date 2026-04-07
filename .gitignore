@@ -1,0 +1,19 @@
+.env
+
+# Downloaded documents and cached files
+pipeline/cache/
+
+
+pipeline/logs
+
+# Pipeline output
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store

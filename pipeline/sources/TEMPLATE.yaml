@@ -1,25 +1,54 @@
-# Source manifest template — copy to {riksmöte_year}.yaml (e.g. 2024_25.yaml)
-# and fill in the URLs before running the ingestion pipeline.
+# Source manifest template — copy to {fiscal_year}.yaml (e.g. 2025.yaml for the
+# budget governing fiscal year 2025, submitted as prop. 2024/25:1)
+# and fill in the URLs and page ranges before running the ingestion pipeline.
 #
 # How to find the URLs:
-#   1. Go to https://www.riksdagen.se/sv/dokument-och-lagar/dokument/motion/
-#   2. Filter by document type "Följdmotion" or "Budgetmotion", year, and party.
-#   3. Open the main budget motion for the party (the one covering all utgiftsområden).
-#   4. Copy the direct download link to the DOCX file from data.riksdagen.se.
+#   Government:
+#     1. Go to https://www.riksdagen.se and find the budget proposition (prop. YYYY/YY:1).
+#     2. Open the PDF and note the pages where the summary spending table is located.
+#     3. Copy the direct PDF download URL from data.riksdagen.se.
+#
+#   Parties:
+#     1. Go to https://www.riksdagen.se/sv/dokument-och-lagar/dokument/motion/
+#     2. Filter by document type "Motion", year, and party.
+#     3. Find the main budget motion (the one covering all utgiftsområden).
+#     4. Open the PDF and note the pages where the summary spending table is located.
+#     5. Copy the direct PDF download URL from data.riksdagen.se.
 #
 # One entry per opposition party. Add or remove parties to match the current
 # parliamentary situation. Party abbreviations must match what the ingestion
 # script and frontend expect (e.g. S, V, MP, C, SD, KD, L, M).
 #
-# Government proposal URLs are NOT listed here — they are fetched automatically
-# via the Riksdagen API.
+# The `pages` field (1-indexed, inclusive) limits extraction to the pages
+# containing the summary table, keeping the input well within token limits.
+# Omit `pages` only for very short documents.
+
+government:
+  url: https://data.riksdagen.se/...  # replace with actual URL
+  pages: "1-10"                        # replace with actual page range
 
 parties:
-  S:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  V:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  MP: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  C:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  # SD: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  # KD: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  # L:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
-  # M:  https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  S:
+    url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+    pages: "1-10"
+  V:
+    url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+    pages: "1-10"
+  MP:
+    url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+    pages: "1-10"
+  C:
+    url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+    pages: "1-10"
+  # SD:
+  #   url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  #   pages: "1-10"
+  # KD:
+  #   url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  #   pages: "1-10"
+  # L:
+  #   url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  #   pages: "1-10"
+  # M:
+  #   url: https://data.riksdagen.se/fil/REPLACE-WITH-ACTUAL-ID
+  #   pages: "1-10"

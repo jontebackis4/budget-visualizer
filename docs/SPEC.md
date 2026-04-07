@@ -21,8 +21,8 @@ GitHub Actions (annual, Oct)
     |
     v
 Ingestion script (Python)
-  ├─ Fetch PDFs from Riksdagen API
-  ├─ Extract text with pdfplumber
+  ├─ Load source manifest (PDF URLs + page ranges from YAML)
+  ├─ Download PDFs, extract specified pages with pdfplumber
   ├─ Normalize tables via Claude API (structured JSON output)
   ├─ Write data/ JSON to a draft PR branch
   └─ Post extracted figures as PR comment for human review
@@ -44,15 +44,14 @@ Static site on Vercel / Cloudflare Pages
 
 | Source | Format | How obtained |
 |---|---|---|
-| Government proposal | PDF (one per utgiftsområde) | Fetched automatically via `data.riksdagen.se/dokumentlista/?doktyp=prop&rm={year}&nr=1` |
-| Party motions | DOCX (one per party, covers all utgiftsområden) | Links collected manually each year into `pipeline/sources/{riksmöte_year}.yaml` |
+| Government proposal | PDF (one summary document) | URL listed manually in `pipeline/sources/{riksmöte_year}.yaml` |
+| Party motions | PDF (one per party, covers all utgiftsområden) | URLs listed manually in `pipeline/sources/{riksmöte_year}.yaml` |
 
-Each opposition party files one main budget motion containing spending figures for all 27
-utgiftsområden, typically in an attachment included in the same document. Because
-the main motion has an unpredictable title and parties sometimes omit per-area
-documents in favour of their main motion, links are collected manually rather than
-auto-discovered via the API. Which parties are in opposition varies by year and is
-captured entirely in the source manifest.
+All source URLs are curated manually each year into the source manifest. This is
+intentional: the government summary document and each party's main budget motion
+have unpredictable titles and locations that are not reliably auto-discoverable via
+the API. Which parties are in opposition varies by year and is captured entirely in
+the source manifest.
 
 #### Source manifest format
 
@@ -60,16 +59,32 @@ Before running the pipeline for a new year, create
 `pipeline/sources/{riksmöte_year}.yaml` (e.g. `pipeline/sources/2023_24.yaml`):
 
 ```yaml
+government:
+  url: https://data.riksdagen.se/...
+  pages: "45-52"       # pages containing the summary spending table
+
 parties:
-  S: https://data.riksdagen.se/fil/...
-  V: https://data.riksdagen.se/fil/...
-  MP: https://data.riksdagen.se/fil/...
-  C: https://data.riksdagen.se/fil/...
+  S:
+    url: https://data.riksdagen.se/...
+    pages: "142-155"
+  V:
+    url: https://data.riksdagen.se/...
+    pages: "98-110"
+  MP:
+    url: https://data.riksdagen.se/...
+    pages: "77-89"
+  C:
+    url: https://data.riksdagen.se/...
+    pages: "101-114"
 ```
 
+The `pages` field specifies the page range (1-indexed, inclusive) sent to Claude.
+Open the PDF manually to locate the summary table and note the page numbers before
+running the pipeline. The `pages` field may be omitted to send the full document,
+though this risks exceeding the model's input token limit for large documents.
+
 Party abbreviations are free-form strings (e.g. `SD`, `KD`, `L`) — add or remove
-entries as the opposition composition changes. Government proposal URLs are not
-listed here — they are always fetched via the API. The pipeline aborts with a clear
+entries as the opposition composition changes. The pipeline aborts with a clear
 error if the manifest for the requested year is missing.
 
 ### 1.2 Ingestion Script (`pipeline/ingest.py`)
@@ -77,18 +92,14 @@ error if the manifest for the requested year is missing.
 **Steps per budget year:**
 
 1. **Load source manifest** from `pipeline/sources/{riksmöte_year}.yaml`. Abort if
-   file is missing.
-2. **Fetch government proposal list** from Riksdagen API; download one PDF per
-   utgiftsområde (27 files).
-3. **Download party motion DOCX files** from the URLs in the manifest (one per party listed).
-4. **Extract text:**
-   - Government PDFs: `pdfplumber` (page-by-page raw text).
-   - Party DOCX files: `python-docx` (paragraph and table text, preserving structure).
-5. **Identify the summary spending table** heuristically (look for rows matching
-   "Utgiftsområde N" pattern or a header containing "anslag"/"totalt").
-6. **Send to Claude API** for structured extraction (see §1.3).
-7. **Validate** output (see §1.4).
-8. **Write approved data** to `data/budget_{year}.json` and to SQLite.
+   file is missing or malformed.
+2. **Download PDFs** — government summary + one per party — from the URLs in the
+   manifest.
+3. **Extract text** using `pdfplumber`, slicing to the `pages` range specified in the
+   manifest for each source.
+4. **Send to Claude API** for structured extraction (see §1.3).
+5. **Validate** output (see §1.4).
+6. **Write approved data** to `data/budget_{year}.json` and to SQLite.
 
 **Failure policy:** If the Claude API call fails (rate limit, timeout, malformed JSON),
 the script aborts immediately, writes a detailed error log to `pipeline/logs/`, and
@@ -100,10 +111,9 @@ No partial writes to SQLite.
 **Model:** `claude-opus-4-6` (most capable; ingestion runs once per year so cost is
 acceptable).
 
-**Input:** The raw text extracted from the relevant section of the source document —
-for government PDFs, the pages containing the spending summary (pre-cropped by
-pdfplumber); for party DOCX files, the full extracted text (python-docx output)
-since the summary table location within the attachment is not predictable.
+**Input:** The text extracted from the pages specified in the source manifest for
+that document (pre-sliced by pdfplumber). The operator identifies the correct pages
+manually before running the pipeline.
 
 **Prompt strategy:** Request structured JSON output with an explicit schema:
 
@@ -201,7 +211,7 @@ CREATE TABLE budget_values (
     source_id    INTEGER REFERENCES sources(id),
     area_id      INTEGER REFERENCES expenditure_areas(id),
     amount_msek  INTEGER,   -- NULL = no data filed
-    doc_id       TEXT,      -- Riksdagen document ID
+    doc_url      TEXT,      -- source PDF URL
     UNIQUE (budget_year, source_id, area_id)
 );
 ```
@@ -387,7 +397,3 @@ month ≥ October, else calendar year − 1).
   ingestion script must map calendar year → riksmöte string correctly.
 - **Rounding convention:** Parties may round to nearest 10 MSEK or 100 MSEK.
   Store as-reported; document rounding in the `/om` page.
-- **Party motion attachment layout:** The summary table is in an attachment within
-  the main motion DOCX. The exact location (page, section) varies by party and year.
-  The heuristic table-finder (step 5) must be robust enough to locate it without
-  manual hints.
