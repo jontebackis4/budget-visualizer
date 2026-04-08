@@ -198,23 +198,24 @@ def extract_pdf_text(pdf_path: Path, pages: Optional[str] = None) -> str:
 
 # ── Step 4: Claude API extraction ─────────────────────────────────────────────
 
-_EXTRACTION_PROMPT = """\
-You are extracting budget data from a Swedish government or party document.
+_MAIN_EXTRACTION_PROMPT = """\
+You are extracting budget data from a Swedish government budget document.
 
 Return a JSON object with this exact schema:
 {{
   "source": "{source}",
   "budget_year": {budget_year},
+  "budget_type": "main",
   "rows": [
-    {{ "area_id": integer (1-27), "area_name": string, "amount_msek": integer }}
+    {{ "area_id": integer (1-27), "area_name": string, "amount_ksek": integer }}
   ],
-  "total_msek": integer,
+  "total_ksek": integer,
   "extraction_notes": string
 }}
 
 Rules:
 - area_id must be 1-27 (the official utgiftsområde number)
-- amount_msek is rounded to the nearest million SEK (no decimals)
+- amount_ksek is the amount in thousands of SEK (tkr) exactly as stated in the document — do not round or convert
 - If a row is absent or illegible, omit it from rows[] and note it in extraction_notes
 - Do not invent figures — if unsure, omit and note it
 
@@ -223,17 +224,55 @@ Text to extract from:
 {text}
 </text>"""
 
+_COUNTER_EXTRACTION_PROMPT = """\
+You are extracting budget deviation data from a Swedish party counter-budget document.
 
-def extract_with_claude(text: str, source_label: str, budget_year: int) -> dict:
+The document lists each utgiftsområde (expenditure area) alongside the government's proposed
+amount and the party's suggested deviation (avvikelse från regeringen). Extract the deviation
+exactly as stated — do not add it to the government amount.
+
+Return a JSON object with this exact schema:
+{{
+  "source": "{source}",
+  "budget_year": {budget_year},
+  "budget_type": "counter",
+  "rows": [
+    {{ "area_id": integer (1-27), "area_name": string, "delta_ksek": integer }}
+  ],
+  "total_delta_ksek": integer,
+  "extraction_notes": string
+}}
+
+Rules:
+- area_id must be 1-27 (the official utgiftsområde number)
+- delta_ksek is the signed deviation in thousands of SEK (tkr) exactly as stated — positive means more than the government proposal, negative means less
+- If the deviation is ±0 or blank, use 0
+- total_delta_ksek is the sum of all row deviations (or the stated total deviation if explicitly given)
+- Do not add the government amount to the delta — extract only the deviation figure
+- If a row is absent or illegible, omit it and note it in extraction_notes
+- Do not invent figures — if unsure, omit and note it
+
+Text to extract from:
+<text>
+{text}
+</text>"""
+
+
+def extract_with_claude(
+    text: str, source_label: str, budget_year: int, budget_type: str,
+    log_responses: bool = False,
+) -> dict:
     """
     Call the Claude API to extract structured budget data from *text*.
 
     Raises RuntimeError (with details written to logs/) on API failure.
+    If *log_responses* is True, the raw API response is written to logs/.
     """
     import anthropic
 
     client = anthropic.Anthropic()
-    prompt = _EXTRACTION_PROMPT.format(
+    template = _MAIN_EXTRACTION_PROMPT if budget_type == "main" else _COUNTER_EXTRACTION_PROMPT
+    prompt = template.format(
         source=source_label,
         budget_year=budget_year,
         text=text,
@@ -253,9 +292,19 @@ def extract_with_claude(text: str, source_label: str, budget_year: int) -> dict:
 
     raw = message.content[0].text if message.content else ""
 
-    # Strip markdown code fences if present
-    raw = re.sub(r"^```(?:json)?\n?", "", raw.strip())
-    raw = re.sub(r"\n?```$", "", raw.strip())
+    if log_responses:
+        _write_response_log(source_label, budget_year, raw)
+
+    # Extract JSON from a ```json ... ``` block anywhere in the response,
+    # then fall back to the outermost { ... } if no fence is found.
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if fence_match:
+        raw = fence_match.group(1)
+    else:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1:
+            raw = raw[start:end + 1]
 
     try:
         return json.loads(raw)
@@ -277,6 +326,14 @@ def _write_error_log(source_label: str, budget_year: int, detail: str) -> None:
     logging.error("Error log written to %s", log_path)
 
 
+def _write_response_log(source_label: str, budget_year: int, raw: str) -> None:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = LOGS_DIR / f"response_{budget_year}_{source_label}_{ts}.log"
+    log_path.write_text(raw)
+    logging.debug("Response log written to %s", log_path)
+
+
 # ── Step 5: Validate extraction ────────────────────────────────────────────────
 
 
@@ -290,9 +347,8 @@ def validate_extraction(result: dict) -> Tuple[bool, List[str]]:
     """
     warnings: List[str] = []
     abort = False
-
+    budget_type = result.get("budget_type", "main")
     rows = result.get("rows", [])
-    total_msek = result.get("total_msek")
 
     invalid_ids = [
         r.get("area_id") for r in rows
@@ -307,14 +363,26 @@ def validate_extraction(result: dict) -> Tuple[bool, List[str]]:
             f"Only {len(rows)} rows extracted (expected ≥20) — likely incomplete."
         )
 
-    if total_msek is not None and rows:
-        computed_sum = sum(r.get("amount_msek", 0) or 0 for r in rows)
-        discrepancy = abs(computed_sum - total_msek)
-        if discrepancy > 500:
-            warnings.append(
-                f"Sum of rows ({computed_sum:,} MSEK) differs from total_msek "
-                f"({total_msek:,} MSEK) by {discrepancy:,} MSEK."
-            )
+    if budget_type == "main":
+        total_ksek = result.get("total_ksek")
+        if total_ksek is not None and rows:
+            computed = sum(r.get("amount_ksek", 0) or 0 for r in rows)
+            discrepancy = abs(computed - total_ksek)
+            if discrepancy != 0:
+                warnings.append(
+                    f"Sum of rows ({computed:,} ksek) differs from total_ksek "
+                    f"({total_ksek:,} ksek) by {discrepancy:,} ksek."
+                )
+    else:
+        total_delta = result.get("total_delta_ksek")
+        if total_delta is not None and rows:
+            computed = sum(r.get("delta_ksek", 0) or 0 for r in rows)
+            discrepancy = abs(computed - total_delta)
+            if discrepancy != 0:
+                warnings.append(
+                    f"Sum of deltas ({computed:,} ksek) differs from total_delta_ksek "
+                    f"({total_delta:,} ksek) by {discrepancy:,} ksek."
+                )
 
     return abort, warnings
 
@@ -332,11 +400,7 @@ def write_json(extractions: List[dict], year: int) -> Path:
 
 
 def write_sqlite(extractions: List[dict], year: int) -> Path:
-    """
-    Write extracted data to data/review/budget_{year}.sqlite.
-
-    Schema matches §2 of the spec.
-    """
+    """Write extracted data to data/review/budget_{year}.sqlite."""
     review_dir = DATA_DIR / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
     db_path = review_dir / f"budget_{year}.sqlite"
@@ -349,58 +413,64 @@ def write_sqlite(extractions: List[dict], year: int) -> Path:
             id    INTEGER PRIMARY KEY,
             name  TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS sources (
-            id    INTEGER PRIMARY KEY,
-            type  TEXT NOT NULL,
-            party TEXT
-        );
         CREATE TABLE IF NOT EXISTS budget_values (
             id           INTEGER PRIMARY KEY,
             budget_year  INTEGER NOT NULL,
-            source_id    INTEGER REFERENCES sources(id),
             area_id      INTEGER REFERENCES expenditure_areas(id),
-            amount_msek  INTEGER,
+            amount_ksek  INTEGER,
             doc_url      TEXT,
-            UNIQUE (budget_year, source_id, area_id)
+            UNIQUE (budget_year, area_id)
         );
+        CREATE TABLE IF NOT EXISTS counter_deviations (
+            id           INTEGER PRIMARY KEY,
+            budget_year  INTEGER NOT NULL,
+            party        TEXT NOT NULL,
+            area_id      INTEGER REFERENCES expenditure_areas(id),
+            delta_ksek   INTEGER,
+            doc_url      TEXT,
+            UNIQUE (budget_year, party, area_id)
+        );
+        CREATE VIEW IF NOT EXISTS counter_effective_amounts AS
+            SELECT
+                cd.budget_year,
+                cd.party,
+                cd.area_id,
+                ea.name                            AS area_name,
+                bv.amount_ksek,
+                cd.delta_ksek,
+                bv.amount_ksek + cd.delta_ksek     AS effective_amount_ksek
+            FROM counter_deviations cd
+            JOIN budget_values bv
+              ON bv.budget_year = cd.budget_year AND bv.area_id = cd.area_id
+            JOIN expenditure_areas ea ON ea.id = cd.area_id;
     """)
 
     for extraction in extractions:
+        budget_type = extraction.get("budget_type", "main")
         source_label = extraction.get("source", "unknown")
-        is_gov = source_label == "government"
-        source_type = "government" if is_gov else "party"
-        party = None if is_gov else source_label
-
-        cur.execute(
-            "INSERT OR IGNORE INTO sources (type, party) VALUES (?, ?)",
-            (source_type, party),
-        )
-        if is_gov:
-            cur.execute(
-                "SELECT id FROM sources WHERE type='government' AND party IS NULL"
-            )
-        else:
-            cur.execute(
-                "SELECT id FROM sources WHERE type='party' AND party=?", (party,)
-            )
-        row = cur.fetchone()
-        source_id = row[0] if row else cur.lastrowid
+        doc_url = extraction.get("doc_url")
 
         for r in extraction.get("rows", []):
             area_id = r.get("area_id")
             area_name = r.get("area_name", "")
-            amount = r.get("amount_msek")
-
             cur.execute(
                 "INSERT OR IGNORE INTO expenditure_areas (id, name) VALUES (?, ?)",
                 (area_id, area_name),
             )
-            cur.execute(
-                """INSERT OR REPLACE INTO budget_values
-                   (budget_year, source_id, area_id, amount_msek, doc_url)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (year, source_id, area_id, amount, extraction.get("doc_url")),
-            )
+            if budget_type == "main":
+                cur.execute(
+                    """INSERT OR REPLACE INTO budget_values
+                       (budget_year, area_id, amount_ksek, doc_url)
+                       VALUES (?, ?, ?, ?)""",
+                    (year, area_id, r.get("amount_ksek"), doc_url),
+                )
+            else:
+                cur.execute(
+                    """INSERT OR REPLACE INTO counter_deviations
+                       (budget_year, party, area_id, delta_ksek, doc_url)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (year, source_label, area_id, r.get("delta_ksek"), doc_url),
+                )
 
     conn.commit()
     conn.close()
@@ -411,7 +481,7 @@ def write_sqlite(extractions: List[dict], year: int) -> Path:
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 
-def main(year: int) -> None:
+def main(year: int, log_responses: bool = False) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -434,11 +504,14 @@ def main(year: int) -> None:
         if not doc.local_path or not doc.local_path.exists():
             logging.warning("Missing local PDF for %s — skipping.", doc.label)
             continue
+        budget_type = "main" if doc.label == "government" else "counter"
         page_info = f" (pages {doc.pages})" if doc.pages else ""
         logging.info("Extracting text from %s%s …", doc.label, page_info)
         text = extract_pdf_text(doc.local_path, doc.pages)
         logging.info("Sending %s to Claude …", doc.label)
-        result = extract_with_claude(text, doc.label, year)
+        result = extract_with_claude(
+            text, doc.label, year, budget_type, log_responses=log_responses
+        )
         result["doc_url"] = doc.url
         abort, warnings = validate_extraction(result)
         if warnings:
@@ -475,5 +548,10 @@ if __name__ == "__main__":
             f"Defaults to current fiscal year ({current_budget_year()})."
         ),
     )
+    parser.add_argument(
+        "--log-responses",
+        action="store_true",
+        help="Save raw Claude API responses to pipeline/logs/response_*.log files.",
+    )
     args = parser.parse_args()
-    main(args.year)
+    main(args.year, log_responses=args.log_responses)
