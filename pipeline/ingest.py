@@ -400,10 +400,10 @@ def write_json(extractions: List[dict], year: int) -> Path:
 
 
 def write_sqlite(extractions: List[dict], year: int) -> Path:
-    """Write extracted data to data/review/budget_{year}.sqlite."""
+    """Write extracted data to data/review/budget.sqlite (shared across all years)."""
     review_dir = DATA_DIR / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
-    db_path = review_dir / f"budget_{year}.sqlite"
+    db_path = review_dir / "budget.sqlite"
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()

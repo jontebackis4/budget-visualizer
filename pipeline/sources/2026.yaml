@@ -1,0 +1,19 @@
+# Budgets submitted during riksmöte 2024/25 regarding expennses for fiscal year 2025
+
+government:
+  url: https://data.riksdagen.se/fil/75F85A4D-7538-4AE8-914C-D528D996692B
+  pages: "438-450"
+
+parties:
+  S:
+    url: https://data.riksdagen.se/fil/3ABE7735-F127-4A44-AA5D-F3080BEB47E4
+    pages: "35-35"
+  V:
+    url: https://data.riksdagen.se/fil/CB6DA06B-3CBA-4298-BDD5-E38ADB8184F7
+    pages: "76-76"
+  MP:
+    url: https://data.riksdagen.se/fil/B34DB875-7A81-462C-92C0-67678D9CCA59
+    pages: "87-87"
+  C:
+    url: https://data.riksdagen.se/fil/A210288E-0C9D-4EC8-914F-02FFCE0E7C5B
+    pages: "61-61"
