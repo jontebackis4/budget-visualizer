@@ -125,15 +125,15 @@ Return a JSON object with this exact schema:
   "source": "government" | string,  // party abbreviation as given in the source manifest
   "budget_year": integer,
   "rows": [
-    { "area_id": integer (1–27), "area_name": string, "amount_msek": integer }
+    { "area_id": integer (1–27), "area_name": string, "amount_ksek": integer }
   ],
-  "total_msek": integer,
+  "total_ksek": integer,
   "extraction_notes": string  // any uncertainty or anomalies
 }
 
 Rules:
 - area_id must be 1–27 (the official utgiftsområde number)
-- amount_msek is rounded to the nearest million SEK (no decimals)
+- amount_ksek is in thousands of SEK (KSEK), rounded to the nearest thousand
 - If a row is absent or illegible, omit it from rows[] and note it in extraction_notes
 - Do not invent figures — if unsure, omit and note it
 
@@ -144,8 +144,8 @@ Text to extract from:
 ```
 
 **Validation after extraction:**
-- Sum `rows[].amount_msek` and compare against `total_msek`.
-- If the discrepancy exceeds 500 MSEK, flag it in the PR comment but do not abort
+- Sum `rows[].amount_ksek` and compare against `total_ksek`.
+- If the discrepancy exceeds 500,000 KSEK (500 MSEK), flag it in the PR comment but do not abort
   (rounding across 27 areas can accumulate).
 - If `rows` contains fewer than 20 entries, flag as likely incomplete.
 - If `area_id` values are not a subset of 1–27, abort.
@@ -156,17 +156,7 @@ After ingestion, the pipeline opens a **draft PR** on GitHub with:
 - `data/budget_{year}.json` committed (the extracted figures)
 - `data/review/budget_{year}.sqlite` (an updated SQLite with the new year)
 
-GitHub Actions then posts a formatted **markdown table comment** on the PR:
-
-```markdown
-## Extracted budget figures — {year}
-
-| Område | Govt (MSEK) | {party_1} | {party_2} | … |
-|--------|-------------|-----------|-----------|---|
-| 1 Rikets styrelse | 14 200 | 14 100 | 13 800 | … |
-| ... | | | | |
-
-**Validation:** Total govt 1 234 567 MSEK (source PDF: 1 234 890 MSEK, Δ 323 MSEK ✓)
+**Validation:** Total govt 1 234 567 000 KSEK (source PDF: 1 234 890 000 KSEK, Δ 323 000 KSEK ✓)
 
 ⚠️ **Flagged rows:** Area 22 — {party} total absent (extraction_notes: "table cut off at page break")
 ```
@@ -199,42 +189,66 @@ CREATE TABLE expenditure_areas (
     name  TEXT NOT NULL         -- Swedish name, e.g. "Hälsovård, sjukvård och social omsorg"
 );
 
-CREATE TABLE sources (
-    id    INTEGER PRIMARY KEY,
-    type  TEXT NOT NULL,  -- 'government' | 'party'
-    party TEXT            -- party abbreviation from source manifest, or NULL for government
-);
-
+-- Government proposal amounts (one row per year × area)
 CREATE TABLE budget_values (
     id           INTEGER PRIMARY KEY,
     budget_year  INTEGER NOT NULL,
-    source_id    INTEGER REFERENCES sources(id),
     area_id      INTEGER REFERENCES expenditure_areas(id),
-    amount_msek  INTEGER,   -- NULL = no data filed
+    amount_ksek  INTEGER,   -- NULL = no data extracted
     doc_url      TEXT,      -- source PDF URL
-    UNIQUE (budget_year, source_id, area_id)
+    UNIQUE (budget_year, area_id)
 );
+
+-- Opposition party deviations from the government proposal
+CREATE TABLE counter_deviations (
+    id           INTEGER PRIMARY KEY,
+    budget_year  INTEGER NOT NULL,
+    party        TEXT NOT NULL,   -- abbreviation from source manifest, e.g. "S", "V"
+    area_id      INTEGER REFERENCES expenditure_areas(id),
+    delta_ksek   INTEGER,         -- NULL = party filed no figure for this area
+    doc_url      TEXT,
+    UNIQUE (budget_year, party, area_id)
+);
+
+-- Convenience view: effective party amounts (govt + delta)
+CREATE VIEW counter_effective_amounts AS
+    SELECT cd.budget_year, cd.party, cd.area_id, ea.name AS area_name,
+           bv.amount_ksek, cd.delta_ksek,
+           bv.amount_ksek + cd.delta_ksek AS effective_amount_ksek
+    FROM counter_deviations cd
+    JOIN budget_values bv ON bv.budget_year = cd.budget_year AND bv.area_id = cd.area_id
+    JOIN expenditure_areas ea ON ea.id = cd.area_id;
 ```
 
-`amount_msek = NULL` means the party filed no figure for that area (shown as "no data"
-in the UI). This is distinct from filing zero.
+`delta_ksek = NULL` means the party filed no figure for that area (shown as "Ingen uppgift"
+in the UI). This is distinct from filing zero (no change from government).
 
 ---
 
 ## 3. Static JSON Export
 
-At SvelteKit build time, a script reads SQLite and writes:
+Run `python pipeline/export_json.py` (manually, or as part of the GitHub Actions build
+job) to read the SQLite and write static JSON files consumed by the frontend:
 
 ```
-src/lib/data/
+frontend/src/lib/data/
   expenditure_areas.json     -- [{id, name}] — static, rarely changes
-  sources.json               -- [{id, type, party}]
-  budget_{year}.json         -- [{area_id, source_id, amount_msek}] per year
-  available_years.json       -- [2021, 2022, 2023, 2024] — sorted ascending
+  available_years.json       -- [2025, 2026, ...] — sorted ascending
+  budget_{year}.json         -- per year:
+    {
+      "government": [{"area_id": int, "amount_ksek": int}],
+      "parties": {
+        "S": [{"area_id": int, "delta_ksek": int | null}],
+        ...
+      }
+    }
+  index.ts                   -- re-exports all budget_{year}.json as a typed map
+                             --   (generated; import { budgetByYear } from '$lib/data')
 ```
 
-All JSON files are imported directly into SvelteKit load functions — no runtime
-database access, no server routes needed for data.
+All JSON files are imported directly into SvelteKit components — no runtime
+database access, no server routes needed for data. The frontend displays values
+in MSEK (divides KSEK by 1000) for readability.
 
 ---
 
@@ -307,7 +321,7 @@ Plot.plot({
   color: { legend: true },
   marks: [
     Plot.barX(data, {
-      x: "delta_msek",
+      x: "delta_msek",        // delta_ksek / 1000, computed from SQLite delta_ksek
       y: "area_name",
       fill: "party",
       title: d => `${d.party}: ${d.delta_msek > 0 ? "+" : ""}${d.delta_msek.toLocaleString("sv-SE")} MSEK`,
@@ -343,10 +357,10 @@ Default: MSEK.
 
 When % is selected, delta is computed as:
 ```
-delta_pct = (party_amount - govt_amount) / govt_amount × 100
+delta_pct = delta_ksek / amount_ksek × 100
 ```
 
-If `govt_amount` is 0 or null for an area, the % value is undefined — show
+If `amount_ksek` is 0 or null for an area, the % value is undefined — show
 "Ingen uppgift" for that cell.
 
 The X-axis label, tooltips, and any summary figures update accordingly.
