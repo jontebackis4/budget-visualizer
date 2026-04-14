@@ -10,12 +10,23 @@
 	let selectedYear: number = availableYears[availableYears.length - 1];
 	let displayMode: 'msek' | 'pct' = 'msek';
 	let chartContainer: HTMLDivElement;
+	let selectedParties: string[] = [];
 
 	// --- derived ---
 	$: budget = budgetByYear[selectedYear];
 	$: parties = budget ? Object.keys(budget.parties).sort() : [];
+	$: selectedParties = [...parties]; // reset when year/parties change
 	$: chartData = buildChartData(budget, displayMode);
-	$: if (chartContainer && chartData) renderChart(chartData, displayMode, parties);
+	$: filteredRows = chartData.filter((d) => selectedParties.includes(d.party));
+	$: if (chartContainer && filteredRows) renderChart(filteredRows, displayMode, selectedParties);
+
+	function toggleParty(party: string) {
+		if (selectedParties.includes(party)) {
+			selectedParties = selectedParties.filter((p) => p !== party);
+		} else {
+			selectedParties = [...selectedParties, party];
+		}
+	}
 
 	function buildChartData(
 		budget: (typeof budgetByYear)[number] | undefined,
@@ -49,7 +60,7 @@
 
 				rows.push({
 					area_id: dev.area_id,
-					area_name: areaMap.get(dev.area_id) ?? `UO ${dev.area_id}`,
+					area_name: `${dev.area_id}. ${areaMap.get(dev.area_id) ?? `UO ${dev.area_id}`}`,
 					party,
 					value,
 					noData: dev.delta_ksek === null
@@ -65,31 +76,77 @@
 		mode: 'msek' | 'pct',
 		parties: string[]
 	) {
+		const marginLeft = 270;
+		const truncate = (s: string, max = 36) =>
+			s.length > max ? s.slice(0, max - 1) + '…' : s;
+
 		// y-axis domain: areas in fixed order 1–27
-		const yDomain = expenditureAreas.map((a) => a.name);
+		const yDomain = expenditureAreas.map((a) => `${a.id}. ${a.name}`);
 		const xLabel = mode === 'msek' ? 'Delta från regeringen (MSEK)' : 'Delta från regeringen (%)';
 
 		const validRows = rows.filter((d) => d.value !== null);
 		const noDataRows = rows.filter((d) => d.noData);
 
+		// Compute x domain from actual data so stripe marks don't skew it
+		const allValues = validRows.map((d) => d.value as number);
+		const xMin = allValues.length ? Math.min(0, ...allValues) : -1;
+		const xMax = allValues.length ? Math.max(0, ...allValues) : 1;
+
+		// All rows get an explicit background so margins look consistent
+		const allRows = yDomain.map((area, i) => ({ area, i }));
+
+		const rowHeight = 42;
+		const marginTop = 30;
+		const marginBottom = 40;
+
 		const plot = Plot.plot({
-			marginLeft: 220,
+			marginLeft,
 			marginRight: 20,
-			marginTop: 30,
-			marginBottom: 40,
+			marginTop,
+			marginBottom,
+			height: yDomain.length * rowHeight + marginTop + marginBottom,
 			width: chartContainer.clientWidth || 900,
-			x: { label: xLabel, grid: true },
-			y: { domain: yDomain, label: null },
+			x: { label: xLabel, domain: [xMin, xMax] },
+			y: { domain: yDomain, label: null, axis: null, paddingInner: 0, paddingOuter: 0 },
 			color: {
 				legend: true,
 				domain: parties,
 				range: parties.map(partyColor)
 			},
 			marks: [
-				Plot.barX(validRows, {
+				// Row backgrounds — clip:false lets them extend into the label margin
+				Plot.barX(allRows, {
+					x1: -1e9,
+					x2: 1e9,
+					y: 'area',
+					fill: (d: { i: number }) => (d.i % 2 === 0 ? '#f5f5f5' : '#ffffff'),
+					clip: false
+				}),
+				// Grid lines drawn after backgrounds so they remain visible
+				Plot.gridX(),
+				// Left-aligned, truncated y-axis labels
+				Plot.axisY({
+					tickSize: 0,
+					tickFormat: (d: string) => truncate(d),
+					textAnchor: 'start',
+					dx: -(marginLeft - 8),
+					clip: false,
+					anchor: 'left',
+					fontSize: 13
+				}),
+				Plot.link(validRows, {
+					x1: 0,
+					x2: 'value',
+					y: 'area_name',
+					stroke: 'party',
+					strokeWidth: 3,
+					strokeLinecap: 'round'
+				}),
+				Plot.dot(validRows, {
 					x: 'value',
 					y: 'area_name',
 					fill: 'party',
+					r: 6,
 					tip: true,
 					title: (d) => {
 						const sign = (d.value ?? 0) > 0 ? '+' : '';
@@ -127,6 +184,22 @@
 				<option value={year}>{year}</option>
 			{/each}
 		</select>
+	</div>
+
+	<div class="control-group">
+		<span class="label">Partier</span>
+		<div class="party-chips">
+			{#each parties as party}
+				<button
+					class="chip"
+					class:active={selectedParties.includes(party)}
+					style="--party-color: {partyColor(party)}"
+					on:click={() => toggleParty(party)}
+				>
+					{party}
+				</button>
+			{/each}
+		</div>
 	</div>
 
 	<div class="control-group">
@@ -169,7 +242,7 @@
 	.label {
 		font-size: 0.875rem;
 		color: var(--color-text-muted);
-		font-weight: 500;
+		font-weight: 700;
 	}
 
 	select {
@@ -203,6 +276,28 @@
 
 	.toggle button.active {
 		background: var(--color-accent);
+		color: #fff;
+	}
+
+	.party-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.375rem;
+	}
+
+	.chip {
+		font-size: 0.8rem;
+		padding: 0.25rem 0.6rem;
+		border-radius: 999px;
+		border: 2px solid var(--party-color, #999);
+		background: transparent;
+		color: var(--color-text-muted);
+		cursor: pointer;
+		transition: background 0.1s, color 0.1s;
+	}
+
+	.chip.active {
+		background: var(--party-color, #999);
 		color: #fff;
 	}
 
